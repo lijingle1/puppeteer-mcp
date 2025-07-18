@@ -215,3 +215,7 @@ docker build -t mcp/puppeteer -f src/puppeteer/Dockerfile .
 ## License
 
 This MCP server is licensed under the MIT License. This means you are free to use, modify, and distribute the software, subject to the terms and conditions of the MIT License. For more details, please see the LICENSE file in the project repository.
+
+## Open Source Notice
+
+This project is derived from the open-source repository [modelcontextprotocol/servers-archived](https://github.com/modelcontextprotocol/servers-archived), specifically the [`src/puppeteer`](https://github.com/modelcontextprotocol/servers-archived/tree/main/src/puppeteer) directory. We have modified and further developed the original code. The upstream project is licensed under the MIT License; we retain the same license here and gratefully acknowledge the original authors for their open-source contribution.

@@ -513,18 +513,6 @@ async function runSSELocalServer() {
   let transport: SSEServerTransport | null = null;
   const app = express();
 
-  // Add body parsing middleware
-  app.use(express.json());
-
-  // Registration endpoint for MCP clients
-  app.post('/register', (req, res) => {
-    res.status(200).json({
-      transport: 'sse',
-      sseEndpoint: '/sse',
-      messageEndpoint: '/messages'
-    });
-  });
-
   app.get('/sse', async (req, res) => {
     transport = new SSEServerTransport(`/messages`, res);
     res.on('close', () => {
@@ -534,6 +522,7 @@ async function runSSELocalServer() {
   });
 
   // Endpoint for the client to POST messages
+  // 不要加任何 body parser
   app.post('/messages', (req, res) => {
     if (transport) {
       transport.handlePostMessage(req, res);
@@ -561,23 +550,6 @@ async function runSSECloudServer() {
   const transports: { [sessionId: string]: SSEServerTransport } = {};
   const app = express();
 
-  // Add body parsing middleware
-  app.use(express.json());
-
-  // Registration endpoint for MCP clients
-  app.post('/register', (req, res) => {
-    const apiKey = getApiKey(req);
-    if (!validateApiKey(apiKey)) {
-      res.status(401).json({ error: 'Unauthorized: Invalid apiKey' });
-      return;
-    }
-    res.status(200).json({
-      transport: 'sse',
-      sseEndpoint: '/sse',
-      messageEndpoint: '/messages'
-    });
-  });
-
   app.get('/health', (req, res) => {
     res.status(200).send('OK');
   });
@@ -599,9 +571,9 @@ async function runSSECloudServer() {
     await server.connect(transport);
   });
 
-  // Endpoint for the client to POST messages
   app.post(
     '/messages',
+    express.json(),
     async (req: Request, res: Response) => {
       const apiKey = getApiKey(req);
       // 校验 apiKey
@@ -610,12 +582,18 @@ async function runSSECloudServer() {
         res.end();
         return;
       }
-      // The raw body is forwarded directly; no express.json() is used to avoid consuming the stream.
+      const body = req.body;
+      const enrichedBody = {
+        ...body,
+      };
+  
+      console.log('enrichedBody', enrichedBody);
+
       const sessionId = req.query.sessionId as string;
       const compositeKey = `${apiKey}-${sessionId}`;
       const transport = transports[compositeKey];
       if (transport) {
-        await transport.handlePostMessage(req, res);
+        await transport.handlePostMessage(req, res, enrichedBody);
       } else {
         res.status(400).send('No transport found for sessionId');
       }

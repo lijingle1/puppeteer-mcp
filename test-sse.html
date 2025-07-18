@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Puppeteer MCP SSE Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        .log { background: #f5f5f5; padding: 10px; border-radius: 3px; margin: 10px 0; font-family: monospace; }
+        button { padding: 10px 15px; margin: 5px; background: #007cba; color: white; border: none; border-radius: 3px; cursor: pointer; }
+        button:hover { background: #005a87; }
+        input, textarea { width: 100%; padding: 8px; margin: 5px 0; border: 1px solid #ddd; border-radius: 3px; }
+        textarea { height: 100px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Puppeteer MCP SSE Test</h1>
+        
+        <div class="section">
+            <h2>Connection Settings</h2>
+            <div>
+                <label>Server URL:</label>
+                <select id="serverUrl">
+                    <option value="http://localhost:3001">Local SSE (Port 3001) - No Auth</option>
+                    <option value="http://localhost:3002">Cloud SSE (Port 3002) - Auth Required</option>
+                </select>
+            </div>
+            <div>
+                <label>API Key (for Cloud mode):</label>
+                <input type="text" id="apiKey" value="dev" placeholder="Enter API key: dev, test1, or puppeteer-mcp-service" />
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Connection Status</h2>
+            <div id="status">Disconnected</div>
+            <button onclick="connect()">Connect to SSE</button>
+            <button onclick="disconnect()">Disconnect</button>
+        </div>
+
+        <div class="section">
+            <h2>Test Tools</h2>
+            <div>
+                <label>URL to navigate:</label>
+                <input type="text" id="url" value="https://example.com" />
+                <button onclick="testNavigate()">Navigate</button>
+            </div>
+            <div>
+                <label>Screenshot name:</label>
+                <input type="text" id="screenshotName" value="test-screenshot" />
+                <button onclick="testScreenshot()">Take Screenshot</button>
+            </div>
+            <div>
+                <label>JavaScript to evaluate:</label>
+                <textarea id="jsCode">document.title</textarea>
+                <button onclick="testEvaluate()">Evaluate JS</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Logs</h2>
+            <div id="logs"></div>
+            <button onclick="clearLogs()">Clear Logs</button>
+        </div>
+    </div>
+
+    <script>
+        let eventSource = null;
+        let sessionId = null;
+
+        function log(message) {
+            const logs = document.getElementById('logs');
+            const logDiv = document.createElement('div');
+            logDiv.className = 'log';
+            logDiv.textContent = new Date().toLocaleTimeString() + ': ' + message;
+            logs.appendChild(logDiv);
+            logs.scrollTop = logs.scrollHeight;
+        }
+
+        function connect() {
+            if (eventSource) {
+                log('Already connected');
+                return;
+            }
+
+            const serverUrl = document.getElementById('serverUrl').value;
+            const apiKey = document.getElementById('apiKey').value;
+            
+            log(`Connecting to SSE at ${serverUrl}...`);
+            
+            // For cloud mode, add API key as query parameter
+            let sseUrl = `${serverUrl}/sse`;
+            if (serverUrl.includes('3002') && apiKey) {
+                sseUrl += `?apiKey=${encodeURIComponent(apiKey)}`;
+                log(`Using API key: ${apiKey}`);
+            }
+            
+            eventSource = new EventSource(sseUrl);
+            
+            eventSource.onopen = function(event) {
+                log('SSE connection opened');
+                document.getElementById('status').textContent = 'Connected';
+                document.getElementById('status').style.color = 'green';
+            };
+
+            eventSource.onmessage = function(event) {
+                log('Received: ' + event.data);
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'session') {
+                        sessionId = data.sessionId;
+                        log('Session ID: ' + sessionId);
+                    }
+                } catch (e) {
+                    // Not JSON, just log as text
+                }
+            };
+
+            eventSource.onerror = function(event) {
+                log('SSE error occurred');
+                document.getElementById('status').textContent = 'Error';
+                document.getElementById('status').style.color = 'red';
+            };
+        }
+
+        function disconnect() {
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+                sessionId = null;
+                log('Disconnected from SSE');
+                document.getElementById('status').textContent = 'Disconnected';
+                document.getElementById('status').style.color = 'black';
+            }
+        }
+
+        async function sendMessage(message) {
+            if (!eventSource) {
+                log('Not connected to SSE');
+                return;
+            }
+
+            try {
+                const serverUrl = document.getElementById('serverUrl').value;
+                const apiKey = document.getElementById('apiKey').value;
+                
+                let url = `${serverUrl}/messages`;
+                const params = new URLSearchParams();
+                
+                if (sessionId) {
+                    params.append('sessionId', sessionId);
+                }
+                
+                // For cloud mode, add API key
+                if (serverUrl.includes('3002') && apiKey) {
+                    params.append('apiKey', apiKey);
+                }
+                
+                if (params.toString()) {
+                    url += '?' + params.toString();
+                }
+                
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(message)
+                });
+
+                if (!response.ok) {
+                    log('HTTP error: ' + response.status);
+                }
+            } catch (error) {
+                log('Send error: ' + error.message);
+            }
+        }
+
+        function testNavigate() {
+            const url = document.getElementById('url').value;
+            log('Testing navigate to: ' + url);
+            sendMessage({
+                jsonrpc: '2.0',
+                id: Date.now(),
+                method: 'tools/call',
+                params: {
+                    name: 'puppeteer_navigate',
+                    arguments: { url: url }
+                }
+            });
+        }
+
+        function testScreenshot() {
+            const name = document.getElementById('screenshotName').value;
+            log('Testing screenshot: ' + name);
+            sendMessage({
+                jsonrpc: '2.0',
+                id: Date.now(),
+                method: 'tools/call',
+                params: {
+                    name: 'puppeteer_screenshot',
+                    arguments: { name: name }
+                }
+            });
+        }
+
+        function testEvaluate() {
+            const code = document.getElementById('jsCode').value;
+            log('Testing evaluate: ' + code);
+            sendMessage({
+                jsonrpc: '2.0',
+                id: Date.now(),
+                method: 'tools/call',
+                params: {
+                    name: 'puppeteer_evaluate',
+                    arguments: { script: code }
+                }
+            });
+        }
+
+        function clearLogs() {
+            document.getElementById('logs').innerHTML = '';
+        }
+    </script>
+</body>
+</html>

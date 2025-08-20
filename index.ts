@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
+import { randomUUID } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   CallToolRequestSchema,
   ListResourcesRequestSchema,
@@ -112,6 +113,20 @@ const consoleLogs: string[] = [];
 const screenshots = new Map<string, string>();
 let previousLaunchOptions: any = null;
 
+// Initialize server early to avoid reference issues
+const server = new Server(
+  {
+    name: "example-servers/puppeteer",
+    version: "0.1.0",
+  },
+  {
+    capabilities: {
+      resources: {},
+      tools: {},
+    },
+  },
+);
+
 async function ensureBrowser({ launchOptions, allowDangerous }: any) {
 
   const DANGEROUS_ARGS = [
@@ -153,6 +168,7 @@ async function ensureBrowser({ launchOptions, allowDangerous }: any) {
     }
   }
   catch (error) {
+    console.warn('Browser connection check failed:', error);
     browser = null;
   }
 
@@ -215,9 +231,13 @@ declare global {
 }
 
 async function handleToolCall(name: string, args: any): Promise<CallToolResult> {
-  const page = await ensureBrowser(args);
+  try {
+    const page = await ensureBrowser(args);
+    if (!page) {
+      throw new Error("Failed to initialize browser");
+    }
 
-  switch (name) {
+    switch (name) {
     case "puppeteer_navigate":
       await page.goto(args.url);
       return {
@@ -407,21 +427,17 @@ async function handleToolCall(name: string, args: any): Promise<CallToolResult> 
         }],
         isError: true,
       };
+    }
+  } catch (error) {
+    return {
+      content: [{
+        type: "text",
+        text: `Tool execution failed: ${(error as Error).message}`,
+      }],
+      isError: true,
+    };
   }
 }
-
-const server = new Server(
-  {
-    name: "example-servers/puppeteer",
-    version: "0.1.0",
-  },
-  {
-    capabilities: {
-      resources: {},
-      tools: {},
-    },
-  },
-);
 
 // 认证逻辑
 const AUTH_API_KEYS = ["alarm-mng-service-online"];
@@ -505,119 +521,42 @@ async function runStdioServer() {
   console.log('Puppeteer MCP Server connected via stdio transport');
 }
 
-// SSE Server Functions
-async function runSSELocalServer() {
-  console.log('Starting Puppeteer MCP Server in SSE Local mode...');
+// HTTP Server Functions
+async function runHttpServer() {
+  console.log('Starting Puppeteer MCP Server in HTTP mode...');
   console.log('Server name: example-servers/puppeteer');
   console.log('Available tools:', TOOLS.map(tool => tool.name).join(', '));
-  let transport: SSEServerTransport | null = null;
+
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: randomUUID });
+  await server.connect(transport);
+
   const app = express();
-
-  app.get('/sse', async (req, res) => {
-    transport = new SSEServerTransport(`/messages`, res);
-    res.on('close', () => {
-      transport = null;
-    });
-    await server.connect(transport);
-  });
-
-  // Endpoint for the client to POST messages
-  // 不要加任何 body parser
-  app.post('/messages', (req, res) => {
-    if (transport) {
-      transport.handlePostMessage(req, res);
-    }
-  });
-
-  // 支持 PORT 环境变量，默认为 3000
-  const PORT = process.env.PORT || 3000;
-  console.log('Starting SSE server on port', PORT);
-  try {
-    app.listen(PORT, () => {
-      console.log(`Puppeteer MCP SSE Server listening on http://localhost:${PORT}`);
-      console.log(`SSE endpoint: http://localhost:${PORT}/sse`);
-      console.log(`Message endpoint: http://localhost:${PORT}/messages`);
-    });
-  } catch (error) {
-    console.error('Error starting SSE server:', error);
-  }
-}
-
-async function runSSECloudServer() {
-  console.log('Starting Puppeteer MCP Server in SSE Cloud mode...');
-  console.log('Server name: example-servers/puppeteer');
-  console.log('Available tools:', TOOLS.map(tool => tool.name).join(', '));
-  const transports: { [sessionId: string]: SSEServerTransport } = {};
-  const app = express();
+  app.use(express.json());
 
   app.get('/health', (req, res) => {
     res.status(200).send('OK');
   });
 
-  app.get('/sse', async (req, res) => {
+  app.post('/mcp', async (req, res) => {
     const apiKey = getApiKey(req);
-    // 校验 apiKey
-    if (!validateApiKey(apiKey)) {
+    if (process.env.CLOUD_SERVICE === 'true' && !validateApiKey(apiKey)) {
       res.status(401).json({ error: "Unauthorized: Invalid apiKey" });
-      res.end();
       return;
     }
-    const transport = new SSEServerTransport(`/messages`, res);
-    const compositeKey = `${apiKey}-${transport.sessionId}`;
-    transports[compositeKey] = transport;
-    res.on('close', () => {
-      delete transports[compositeKey];
-    });
-    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
   });
 
-  app.post(
-    '/messages',
-    express.json(),
-    async (req: Request, res: Response) => {
-      const apiKey = getApiKey(req);
-      // 校验 apiKey
-      if (!validateApiKey(apiKey)) {
-        res.status(401).json({ error: "Unauthorized: Invalid apiKey" });
-        res.end();
-        return;
-      }
-      const body = req.body;
-      const enrichedBody = {
-        ...body,
-      };
-  
-      console.log('enrichedBody', enrichedBody);
-
-      const sessionId = req.query.sessionId as string;
-      const compositeKey = `${apiKey}-${sessionId}`;
-      const transport = transports[compositeKey];
-      if (transport) {
-        await transport.handlePostMessage(req, res, enrichedBody);
-      } else {
-        res.status(400).send('No transport found for sessionId');
-      }
-    }
-  );
-
-  // 支持 PORT 环境变量，默认为 3000
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, () => {
-    console.log(`Puppeteer MCP SSE Server listening on http://localhost:${PORT}`);
-    console.log(`SSE endpoint: http://localhost:${PORT}/sse`);
-    console.log(`Message endpoint: http://localhost:${PORT}/messages`);
+    console.log(`Puppeteer MCP HTTP Server listening on http://localhost:${PORT}`);
+    console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
   });
 }
 
 // Start server based on environment variables
-if (process.env.CLOUD_SERVICE === 'true') {
-  runSSECloudServer().catch((error: any) => {
-    console.error('Fatal error running cloud SSE server:', error);
-    process.exit(1);
-  });
-} else if (process.env.SSE_LOCAL === 'true') {
-  runSSELocalServer().catch((error: any) => {
-    console.error('Fatal error running local SSE server:', error);
+if (process.env.CLOUD_SERVICE === 'true' || process.env.SSE_LOCAL === 'true') {
+  runHttpServer().catch((error: any) => {
+    console.error('Fatal error running HTTP server:', error);
     process.exit(1);
   });
 } else {
